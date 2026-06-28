@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "/Users/vibemachine/Developer/fusion/src/index.ts",
+      {
+        "panel": ["opencode/big-pickle", "opencode/north-mini-code-free"],
+        "synthesizer": "opencode/big-pickle"
+      }
+    ]
+  ]
+}

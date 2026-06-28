@@ -1,0 +1,19 @@
+{
+  "name": "opencode-fusion",
+  "version": "0.1.0",
+  "description": "Fan a hard prompt out to a panel of models in parallel as read-only explorers, then aggregate their findings into one plan. An OpenCode plugin.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "command", "README.md"],
+  "keywords": ["opencode", "opencode-plugin", "fusion", "multi-model", "agents"],
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.17.11"
+  },
+  "devDependencies": {
+    "@opencode-ai/sdk": "1.17.11"
+  }
+}
