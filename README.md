@@ -1,9 +1,9 @@
 <div align="center">
 
 # fusion
-<img width="1254" height="1254" alt="photo_2026-07-01_12-50-46" src="https://github.com/user-attachments/assets/796945c2-2a51-4dcc-b899-f6f296228c69" />
-
 **A panel of models, one answer.**
+
+<img width="250" height="250" alt="photo_2026-07-01_12-50-46" src="https://github.com/user-attachments/assets/796945c2-2a51-4dcc-b899-f6f296228c69" />
 
 Fan one hard prompt across many models in parallel as read-only explorers, then merge their
 findings into a single answer — without losing any distinct point.
