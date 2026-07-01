@@ -1,6 +1,7 @@
 <div align="center">
 
 # fusion
+<img width="1254" height="1254" alt="photo_2026-07-01_12-50-46" src="https://github.com/user-attachments/assets/796945c2-2a51-4dcc-b899-f6f296228c69" />
 
 **A panel of models, one answer.**
 
