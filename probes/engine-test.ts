@@ -32,8 +32,10 @@ try {
     error: e.error,
     outLen: e.output?.length,
   }))
-  out.planLen = result.plan.length
-  out.planHead = result.plan.slice(0, 1800)
+  out.synthOk = result.synthOk
+  out.synthError = result.synthError
+  out.planLen = result.plan?.length ?? 0
+  out.planHead = result.plan?.slice(0, 1800)
   out.ok = true
 } catch (e: any) {
   out.ok = false

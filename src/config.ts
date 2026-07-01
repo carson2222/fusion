@@ -1,6 +1,4 @@
-// Fusion config — parsed from the plugin options tuple:
-//   "plugin": [["opencode-fusion", { panel: [...], synthesizer?: "..." }]]
-// Kept deliberately tiny (PLAN.md: panel required, synthesizer optional).
+// Config parsed from the plugin options tuple: [["@carson2222/fusion", { panel, synthesizer? }]].
 
 export type Model = { providerID: string; modelID: string; variant?: string; slug: string }
 
@@ -9,13 +7,9 @@ export type FusionConfig = {
   synthesizer?: Model
 }
 
-// Parse a panel entry of the form "provider/model" or "provider/model#effort".
-// The optional "#effort" suffix names a per-model reasoning VARIANT (effort level) the
-// model exposes — e.g. "anthropic/claude-opus-4-8#max", "openai/gpt-5.5#xhigh". We split
-// the effort off the END on "#" (which never appears in a model id, so multi-slash model
-// ids like "openrouter/anthropic/claude-x" stay intact), then split provider/model on the
-// FIRST slash. The variant string is passed through opaquely; the server validates it and
-// falls back to the model's default if it's unknown (so a typo degrades, never crashes).
+// Parse "provider/model" or "provider/model#effort". Split the optional effort off the END on
+// "#" (never in a model id, so multi-slash ids survive), then provider/model on the FIRST "/".
+// The variant is opaque; the server falls back to the model default if it's unknown.
 // `slug` keeps the full original (incl. "#effort") so the footer shows the effort in use.
 export function parseModelSlug(raw: string): Model {
   const hash = raw.lastIndexOf("#")
@@ -30,7 +24,7 @@ export function parseModelSlug(raw: string): Model {
 
 const CONFIG_HINT =
   'Fusion: set a "panel" in the plugin options, e.g.\n' +
-  '  "plugin": [["opencode-fusion", { "panel": ["openai/gpt-5#high", "google/gemini-3-pro"] }]]'
+  '  "plugin": [["@carson2222/fusion", { "panel": ["openai/gpt-5#high", "google/gemini-3-pro"] }]]'
 
 export function parseConfig(options: Record<string, unknown> | undefined): FusionConfig {
   const panelRaw = options?.panel

@@ -1,16 +1,13 @@
-// The weight-bearing piece. Probe finding: `system` is an additive LENS, not authoritative —
-// so the real instructions ride in the task `parts`. Explorers run blind & parallel; the
-// aggregator must MERGE losslessly (not summarize).
+// Explorer + aggregator prompts. `system` is only an additive lens (see docs/internals.md);
+// the real instructions ride in the task `parts`, and read-only is enforced by the tool block.
 
-// Stance only — `system` is a weak, additive lens (probe: a strict "reply X only" system was
-// ignored). It does NOT enforce behavior; the hard guarantee is the tool block in fusion.ts
-// (`question`/`task`/`todowrite` disabled, so an explorer literally cannot ask or branch out).
+// Stance lens only — not a behavioral guarantee.
 export const EXPLORER_SYSTEM = [
   "Analyze, explore, think, and reason how to solve this task.",
   "This is analysis and exploration only. Never modify anything.",
   "Be specific and terse. No filler, no restating the task back to me.",
   "Return findings as plain final text.",
-].join(" ");
+].join(" ")
 
 export function buildExplorerParts(task: string): string {
   return [
@@ -22,16 +19,12 @@ export function buildExplorerParts(task: string): string {
     "",
     "TASK:",
     task.trim(),
-  ].join("\n");
+  ].join("\n")
 }
 
-// Aggregator instructions live in `parts` (authoritative — `system` is too weak to rely on),
-// with the raw findings inlined. The aggregator gets ONLY the analysis text — no model
-// names, counts, or run status. It must not know who/what produced these, only the content.
+// The aggregator gets ONLY the analysis text — no model names, counts, or run status.
 export function buildAggregatorParts(task: string, analyses: string[]): string {
-  const sections = analyses
-    .map((output, i) => `--- Analysis ${i + 1} ---\n${output.trim()}`)
-    .join("\n\n");
+  const sections = analyses.map((output, i) => `--- Analysis ${i + 1} ---\n${output.trim()}`).join("\n\n")
 
   return [
     "Below are independent analyses of the same task. Merge them into one answer.",
@@ -43,5 +36,5 @@ export function buildAggregatorParts(task: string, analyses: string[]): string {
     "",
     "ANALYSES:",
     sections,
-  ].join("\n");
+  ].join("\n")
 }

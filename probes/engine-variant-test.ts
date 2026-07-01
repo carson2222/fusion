@@ -23,7 +23,8 @@ try {
   })
 
   out.synthesizer = result.synthesizer
-  out.planLen = result.plan.length
+  out.synthOk = result.synthOk
+  out.planLen = result.plan?.length ?? 0
   out.explorers = []
   for (const e of result.explorers) {
     let storedVariant: any = null

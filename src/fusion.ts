@@ -1,25 +1,16 @@
-// Fusion engine: fan one task out to a panel of read-only explorers in parallel,
-// then aggregate their findings with the synthesizer model. Pure functions over the
-// OpenCode SDK client — no plugin wiring here, so it's testable in isolation and a
-// future orchestrator can call it directly. Verified call shapes: probes/FINDINGS.md.
+// Engine: fan one task out to read-only explorers in parallel, then aggregate with the
+// synthesizer. Pure over the SDK client (no plugin wiring). SDK gotchas: docs/internals.md.
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import { parseConfig, type Model } from "./config"
 import { EXPLORER_SYSTEM, buildAggregatorParts, buildExplorerParts } from "./prompts"
 
-// Per-call wall-clock ceiling. A hung explorer is dropped, not allowed to hang the run.
-const EXPLORER_TIMEOUT_MS = 300_000
-const SYNTH_TIMEOUT_MS = 300_000
-// Explorers run as the full `build` agent, so they inherit its god-mode toolset. We block
-// the entire set of built-in ACTION/CONTROL tools, leaving only read + research/MCP tools
-// (which are the safe, useful ones and also the dynamically-growing ones we WANT to keep):
-//   write/edit/patch/bash → mutate the shared worktree
-//   question              → pauses the whole panel on a dialog, masquerades as the result
-//   task                  → nested subagent fan-out
-//   fusion                → SELF-RECURSION (explorers spawning their own panels — observed)
-//   plan_exit             → drops into plan mode, writes a plan file, blocks on a dialog (observed)
-//   todowrite             → noise
-// This is a denylist, but the dangerous tools are OpenCode's FINITE built-in set; the
-// dynamic part (MCP/web/read) is exactly what we allow. Add new built-in action tools here.
+// Generous backstops, not the primary control: on a synth timeout we recover the persisted
+// plan (recoverSynthPlan) instead of discarding the fan-out.
+const EXPLORER_TIMEOUT_MS = 900_000
+const SYNTH_TIMEOUT_MS = 1_800_000
+
+// Block the finite set of built-in action/control tools; keep read/research/MCP/web. Explorers
+// run as `build`, so this is the only read-only guarantee. Rationale: docs/internals.md.
 const READONLY_TOOLS = {
   write: false,
   edit: false,
@@ -48,6 +39,22 @@ const partTypeSummary = (parts: any[] = []) => {
 const withTimeout = (ms: number, caller?: AbortSignal) =>
   caller ? AbortSignal.any([caller, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms)
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+// A raw Error/DOMException JSON.stringifies to "{}" (non-enumerable props); pull a real message.
+const errText = (err: any): string => {
+  if (err == null) return "unknown error"
+  if (typeof err === "string") return err
+  const msg = err.data?.message ?? err.message ?? err.name
+  if (msg) return String(msg)
+  try {
+    const s = JSON.stringify(err)
+    return s && s !== "{}" ? s : String(err)
+  } catch {
+    return String(err)
+  }
+}
+
 export type ExplorerResult = {
   slug: string
   sessionId?: string
@@ -57,13 +64,16 @@ export type ExplorerResult = {
 }
 
 export type FusionResult = {
-  plan: string
+  // Present when synthesis succeeded or was recovered; absent when it genuinely failed —
+  // callers then degrade to `explorers` and must never re-run the panel.
+  plan?: string
   synthesizer: string
+  synthOk: boolean
+  synthError?: string
   explorers: ExplorerResult[]
 }
 
-// Read the model the user is currently driving with — the synthesizer default.
-// Precise source = the calling assistant message; fall back to the last assistant message.
+// Synthesizer default: the calling assistant message's model, else the last assistant message.
 async function readCurrentModel(
   client: OpencodeClient,
   sessionID: string,
@@ -86,9 +96,8 @@ async function readCurrentModel(
   return undefined
 }
 
-// One explorer: its own child session, blind to the others, read-only.
-// `onSettled` fires once with the final result (ok or failed) so the caller can surface
-// run health (e.g. a toast) — the engine itself stays UI-agnostic.
+// One explorer: its own child session, blind to the others, read-only. `onSettled` fires once
+// so the caller can surface run health while the engine stays UI-agnostic.
 async function runExplorer(
   client: OpencodeClient,
   parentID: string,
@@ -110,9 +119,7 @@ async function runExplorer(
       path: { id: sessionId },
       body: {
         model: { providerID: model.providerID, modelID: model.modelID },
-        // Per-call reasoning effort (verified: the prompt route accepts + persists `variant`;
-        // unknown values fall back to the model default server-side). Omit when unset.
-        ...(model.variant ? { variant: model.variant } : {}),
+        ...(model.variant ? { variant: model.variant } : {}), // per-call effort; unknown → model default
         system: EXPLORER_SYSTEM,
         tools: { ...READONLY_TOOLS },
         parts: [{ type: "text", text: buildExplorerParts(task) }],
@@ -120,7 +127,7 @@ async function runExplorer(
       signal: withTimeout(EXPLORER_TIMEOUT_MS, caller),
     } as any)
     if (r?.error) throw new Error(typeof r.error === "string" ? r.error : JSON.stringify(r.error))
-    // A failed model call comes back 200 with the error on info.error (not r.error) + empty parts.
+    // Failed model calls return 200 with the error on info.error (not r.error) + empty parts.
     const info = r?.data?.info
     if (info?.error) throw new Error(info.error?.data?.message ?? info.error?.message ?? info.error?.name ?? "model error")
 
@@ -139,6 +146,36 @@ async function runExplorer(
   return result
 }
 
+// A client abort/timeout doesn't stop the server — it finishes and persists the message. Poll
+// the synth session for its completed message instead of throwing the fan-out away. Bail fast on
+// a hard model error (never completes) or a user cancel.
+async function recoverSynthPlan(
+  client: OpencodeClient,
+  sessionId: string,
+  caller?: AbortSignal,
+): Promise<string | undefined> {
+  const fetchLast = async () => {
+    const msgs: any = await client.session.messages({ path: { id: sessionId } }).catch(() => null)
+    return [...((msgs?.data ?? []) as any[])].reverse().find((x) => x?.info?.role === "assistant")
+  }
+  const deadline = Date.now() + 45_000
+  while (Date.now() < deadline) {
+    if (caller?.aborted) return undefined
+    const last = await fetchLast()
+    const info = last?.info
+    if (info?.error) return undefined
+    if (info?.time?.completed) {
+      const text = textOf(last.parts)
+      return text || undefined
+    }
+    await sleep(3000)
+  }
+  const last = await fetchLast()
+  if (last?.info?.error) return undefined
+  const text = last ? textOf(last.parts) : ""
+  return text || undefined
+}
+
 export async function runFusion(input: {
   client: OpencodeClient
   task: string
@@ -146,8 +183,7 @@ export async function runFusion(input: {
   messageID?: string
   options: Record<string, unknown> | undefined
   signal?: AbortSignal
-  // Fires once per explorer as it settles (ok or failed). UI-agnostic: the tool layer
-  // uses it to surface run health (toast). The engine never decides how it's shown.
+  // Fires once per explorer as it settles; the tool layer uses it to surface run health.
   onExplorerSettled?: (e: ExplorerResult) => void
 }): Promise<FusionResult> {
   const { client, task, sessionID, messageID, signal } = input
@@ -158,7 +194,6 @@ export async function runFusion(input: {
   const synth: Model =
     config.synthesizer ?? (await readCurrentModel(client, sessionID, messageID)) ?? config.panel[0]
 
-  // Fan out — genuinely parallel (probe R2), each blind & read-only.
   const explorers = await Promise.all(
     config.panel.map((m) => runExplorer(client, sessionID, m, task, signal, input.onExplorerSettled)),
   )
@@ -170,29 +205,36 @@ export async function runFusion(input: {
     )
   }
 
-  // Aggregate INTERNALLY with the synthesizer, so only the merged plan returns to the main
-  // session (raw audits stay in the explorer child sessions). PLAN.md: aggregate, never summarize.
+  // Aggregate internally: only the merged plan returns to the main session; raw audits stay in
+  // the explorer child sessions.
   const agg: any = await client.session.create({ body: { parentID: sessionID, title: "fusion synthesizer" } })
   const aggId = agg?.data?.id
-  if (agg?.error || !aggId) throw new Error(`Fusion: synthesizer session.create failed: ${JSON.stringify(agg?.error ?? {})}`)
+  if (agg?.error || !aggId) throw new Error(`Fusion: synthesizer session.create failed: ${errText(agg?.error)}`)
 
-  const res: any = await client.session.prompt({
-    path: { id: aggId },
-    body: {
-      model: { providerID: synth.providerID, modelID: synth.modelID },
-      ...(synth.variant ? { variant: synth.variant } : {}),
-      tools: { ...READONLY_TOOLS },
-      parts: [{ type: "text", text: buildAggregatorParts(task, succeeded.map((e) => e.output!)) }],
-    },
-    signal: withTimeout(SYNTH_TIMEOUT_MS, signal),
-  } as any)
-  if (res?.error) throw new Error(`Fusion: synthesizer failed: ${typeof res.error === "string" ? res.error : JSON.stringify(res.error)}`)
-  const synthInfo = res?.data?.info
-  if (synthInfo?.error)
-    throw new Error(`Fusion: synthesizer (${synth.slug}) errored: ${synthInfo.error?.data?.message ?? synthInfo.error?.name ?? "model error"}`)
+  let plan: string | undefined
+  let synthError: string | undefined
+  try {
+    const res: any = await client.session.prompt({
+      path: { id: aggId },
+      body: {
+        model: { providerID: synth.providerID, modelID: synth.modelID },
+        ...(synth.variant ? { variant: synth.variant } : {}),
+        tools: { ...READONLY_TOOLS },
+        parts: [{ type: "text", text: buildAggregatorParts(task, succeeded.map((e) => e.output!)) }],
+      },
+      signal: withTimeout(SYNTH_TIMEOUT_MS, signal),
+    } as any)
+    if (res?.error) throw new Error(errText(res.error))
+    if (res?.data?.info?.error) throw new Error(errText(res.data.info.error))
+    plan = textOf(res?.data?.parts) || undefined
+    if (!plan) throw new Error("synthesizer produced no output")
+  } catch (e: any) {
+    synthError = errText(e)
+    plan = await recoverSynthPlan(client, aggId, signal) // reclaim the persisted plan if the server finished after we gave up
+  }
 
-  const plan = textOf(res?.data?.parts)
-  if (!plan) throw new Error("Fusion: synthesizer produced no output.")
-
-  return { plan, synthesizer: synth.slug, explorers }
+  if (plan) return { plan, synthesizer: synth.slug, synthOk: true, explorers }
+  // Synthesis genuinely failed: hand back raw findings so the caller synthesizes directly —
+  // never drop them, never re-run the panel.
+  return { synthesizer: synth.slug, synthOk: false, synthError, explorers }
 }
